@@ -39,7 +39,7 @@ CREATE TABLE MEMBERS
     Last_name VARCHAR(30) NOT NULL,
     Address VARCHAR(50),
     Phone_number VARCHAR(20),
-    Email VARCHAR(50),
+    Email VARCHAR(50) NOT NULL,
     Join_date DATE,
     PRIMARY KEY(Member_id)
 );
