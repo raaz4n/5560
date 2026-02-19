@@ -40,6 +40,7 @@ CREATE TABLE MEMBERS
     Address VARCHAR(50),
     Phone_number VARCHAR(20),
     Email VARCHAR(50) NOT NULL,
+	Password_hash VARCHAR(255) NOT NULL,
     Join_date DATE,
     PRIMARY KEY(Member_id)
 );
