@@ -42,6 +42,7 @@ CREATE TABLE MEMBERS
     Email VARCHAR(50) NOT NULL,
 	Password_hash VARCHAR(255) NOT NULL,
     Join_date DATE,
+    Member_role VARCHAR(20) NOT NULL,
     PRIMARY KEY(Member_id)
 );
 
