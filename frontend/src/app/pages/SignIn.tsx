@@ -33,7 +33,7 @@ export default function SignIn() {
       }).then(res => res.json());
 
       setUser(me);
-      navigate("/Search");
+      navigate("/search");
 
     } catch (err) {
       console.error(err);

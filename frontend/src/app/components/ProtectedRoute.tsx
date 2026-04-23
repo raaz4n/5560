@@ -1,7 +1,11 @@
 import { Navigate } from "react-router";
 import { useAuth } from "./AuthContext";
 
-export default function ProtectedRoute({ children, adminOnly = false }) {
+export default function ProtectedRoute({
+  children,
+  adminOnly = false,
+  staffOnly = false,
+}) {
   const auth = useAuth();
 
   if (!auth || auth.loading) return null;
@@ -13,6 +17,11 @@ export default function ProtectedRoute({ children, adminOnly = false }) {
 
   // Admin-only route but user is not admin
   if (adminOnly && user.Member_role !== "admin") {
+    return <Navigate to="/" replace />;
+  }
+
+  // Staff-only route: allow librarians and admins
+  if (staffOnly && user.Member_role !== "admin" && user.Member_role !== "librarian") {
     return <Navigate to="/" replace />;
   }
 

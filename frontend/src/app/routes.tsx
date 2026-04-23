@@ -11,6 +11,11 @@ import ManageBooks from "./pages/admin/ManageBooks";
 import ManageLoans from "./pages/admin/ManageLoans";
 import LibraryStats from "./pages/admin/LibraryStats";
 
+import LibrarianDashboard from "./pages/librarian/LibrarianDashboard";
+import CirculationDesk from "./pages/librarian/CirculationDesk";
+import MemberLookup from "./pages/librarian/MemberLookup";
+import FinesDesk from "./pages/librarian/FinesDesk";
+
 import ProtectedRoute from "./components/ProtectedRoute";
 
 function AdminDashboardWrapper() {
@@ -53,6 +58,38 @@ function LibraryStatsWrapper() {
   );
 }
 
+function LibrarianDashboardWrapper() {
+  return (
+    <ProtectedRoute staffOnly>
+      <LibrarianDashboard />
+    </ProtectedRoute>
+  );
+}
+
+function CirculationDeskWrapper() {
+  return (
+    <ProtectedRoute staffOnly>
+      <CirculationDesk />
+    </ProtectedRoute>
+  );
+}
+
+function MemberLookupWrapper() {
+  return (
+    <ProtectedRoute staffOnly>
+      <MemberLookup />
+    </ProtectedRoute>
+  );
+}
+
+function FinesDeskWrapper() {
+  return (
+    <ProtectedRoute staffOnly>
+      <FinesDesk />
+    </ProtectedRoute>
+  );
+}
+
 
 export const router = createBrowserRouter([
   {
@@ -69,6 +106,11 @@ export const router = createBrowserRouter([
       { path: "admin/books", Component: ManageBooksWrapper },
       { path: "admin/loans", Component: ManageLoansWrapper },
       { path: "admin/stats", Component: LibraryStatsWrapper },
+
+      { path: "librarian", Component: LibrarianDashboardWrapper },
+      { path: "librarian/circulation", Component: CirculationDeskWrapper },
+      { path: "librarian/members", Component: MemberLookupWrapper },
+      { path: "librarian/fines", Component: FinesDeskWrapper },
     ],
   },
 ]);

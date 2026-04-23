@@ -122,6 +122,11 @@ def get_current_user(access_token: str | None):
 def require_admin(user: dict):
     if (user.get("Member_role") or "").lower() != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+
+def require_librarian_or_admin(user: dict):
+    role = (user.get("Member_role") or "").lower()
+    if role not in ("admin", "librarian"):
+        raise HTTPException(status_code=403, detail="Librarian or admin access required")
     
 def update_fines_for_member(member_id: int):
     db = get_db()
@@ -543,7 +548,7 @@ def admin_get_books(
 
     # Base query
     query = """
-        SELECT 
+        SELECT
             b.Book_id,
             b.ISBN,
             b.Title,
@@ -551,6 +556,7 @@ def admin_get_books(
             b.Total_stock,
             b.Avail_stock,
             b.Genre,
+            b.Publisher_id,
             p.Publisher_name
         FROM book b
         LEFT JOIN publisher p ON b.Publisher_id = p.Publisher_id
@@ -912,3 +918,612 @@ def admin_stats(access_token: str = Cookie(None)):
         "overdue_loans": overdue_loans,
         "lost_or_damaged": lost_or_damaged
     }
+
+# ADMIN: ANALYTICS
+
+@app.get("/admin/analytics/loan_trend")
+def admin_loan_trend(access_token: str = Cookie(None), days: int = 30):
+    current = get_current_user(access_token)
+    require_admin(current)
+
+    if days <= 0 or days > 365:
+        days = 30
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT DATE(Loan_date) AS date, COUNT(*) AS count
+        FROM loan
+        WHERE Loan_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+        GROUP BY DATE(Loan_date)
+        ORDER BY DATE(Loan_date) ASC
+    """, (days,))
+
+    rows = cursor.fetchall()
+    cursor.close()
+    db.close()
+
+    return [
+        {
+            "date": (r["date"].isoformat() if hasattr(r["date"], "isoformat") else str(r["date"])),
+            "count": int(r["count"]),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/admin/analytics/top_books")
+def admin_top_books(access_token: str = Cookie(None), limit: int = 5):
+    current = get_current_user(access_token)
+    require_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT b.Title AS name, COUNT(l.Loan_id) AS count
+        FROM loan l
+        JOIN book b ON b.Book_id = l.Book_id
+        GROUP BY b.Book_id, b.Title
+        ORDER BY count DESC
+        LIMIT %s
+    """, (limit,))
+
+    rows = cursor.fetchall()
+    cursor.close()
+    db.close()
+
+    return [{"name": r["name"], "count": int(r["count"])} for r in rows]
+
+
+@app.get("/admin/analytics/top_members")
+def admin_top_members(access_token: str = Cookie(None), limit: int = 5):
+    current = get_current_user(access_token)
+    require_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT CONCAT(m.First_name, ' ', m.Last_name) AS name, COUNT(l.Loan_id) AS count
+        FROM loan l
+        JOIN MEMBERS m ON m.Member_id = l.Member_id
+        GROUP BY m.Member_id, m.First_name, m.Last_name
+        ORDER BY count DESC
+        LIMIT %s
+    """, (limit,))
+
+    rows = cursor.fetchall()
+    cursor.close()
+    db.close()
+
+    return [{"name": r["name"], "count": int(r["count"])} for r in rows]
+
+# LIBRARIAN: DASHBOARD STATS
+
+@app.get("/librarian/stats")
+def librarian_stats(access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        UPDATE loan
+        SET Return_status = 'overdue'
+        WHERE Return_status = 'borrowed'
+          AND DATE(Due_date) < CURDATE()
+    """)
+    cursor.execute("""
+        UPDATE loan
+        SET Return_status = 'borrowed'
+        WHERE Return_status = 'overdue'
+          AND DATE(Due_date) >= CURDATE()
+    """)
+    db.commit()
+
+    cursor.execute("SELECT COUNT(*) AS c FROM loan WHERE DATE(Loan_date) = CURDATE()")
+    loans_today = cursor.fetchone()["c"]
+
+    cursor.execute("SELECT COUNT(*) AS c FROM loan WHERE DATE(Return_date) = CURDATE()")
+    returns_today = cursor.fetchone()["c"]
+
+    cursor.execute("SELECT COUNT(*) AS c FROM loan WHERE Return_status = 'borrowed'")
+    active_loans = cursor.fetchone()["c"]
+
+    cursor.execute("SELECT COUNT(*) AS c FROM loan WHERE Return_status = 'overdue'")
+    overdue_loans = cursor.fetchone()["c"]
+
+    cursor.execute("SELECT COUNT(*) AS c FROM fine WHERE Paid_status = 'Unpaid'")
+    unpaid_fines = cursor.fetchone()["c"]
+
+    cursor.execute("""
+        SELECT COALESCE(SUM(Fine_amount), 0) AS total
+        FROM fine
+        WHERE Paid_status = 'Unpaid'
+    """)
+    unpaid_total = float(cursor.fetchone()["total"] or 0)
+
+    cursor.close()
+    db.close()
+
+    return {
+        "loans_today": loans_today,
+        "returns_today": returns_today,
+        "active_loans": active_loans,
+        "overdue_loans": overdue_loans,
+        "unpaid_fines": unpaid_fines,
+        "unpaid_total": unpaid_total,
+    }
+
+# LIBRARIAN: BOOK LOOKUP (read-only, for circulation desk)
+
+@app.get("/librarian/books")
+def librarian_get_books(
+    access_token: str = Cookie(None),
+    search: str | None = None,
+    limit: int = 25,
+):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    query = """
+        SELECT b.Book_id, b.ISBN, b.Title, b.Publish_year,
+               b.Total_stock, b.Avail_stock, b.Genre,
+               p.Publisher_name
+        FROM book b
+        LEFT JOIN publisher p ON b.Publisher_id = p.Publisher_id
+    """
+    params = []
+
+    if search:
+        query += """
+            WHERE b.Title LIKE %s
+               OR b.ISBN LIKE %s
+               OR CAST(b.Book_id AS CHAR) = %s
+        """
+        like = f"%{search}%"
+        params.extend([like, like, search])
+
+    query += " ORDER BY b.Title LIMIT %s"
+    params.append(limit)
+
+    cursor.execute(query, params)
+    books = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+    return books
+
+# LIBRARIAN: MEMBER LOOKUP
+
+@app.get("/librarian/members")
+def librarian_get_members(
+    access_token: str = Cookie(None),
+    search: str | None = None,
+    limit: int = 25,
+):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    query = """
+        SELECT Member_id, First_name, Last_name, Email, Phone_number,
+               Join_date, Member_role
+        FROM MEMBERS
+    """
+    params = []
+
+    if search:
+        query += """
+            WHERE CAST(Member_id AS CHAR) = %s
+               OR First_name LIKE %s
+               OR Last_name LIKE %s
+               OR Email LIKE %s
+        """
+        like = f"%{search}%"
+        params.extend([search, like, like, like])
+
+    query += " ORDER BY Last_name, First_name LIMIT %s"
+    params.append(limit)
+
+    cursor.execute(query, params)
+    members = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+    return members
+
+
+@app.get("/librarian/members/{member_id}/summary")
+def librarian_member_summary(member_id: int, access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    update_fines_for_member(member_id)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT Member_id, First_name, Last_name, Email, Phone_number, Address,
+               Join_date, Member_role
+        FROM MEMBERS WHERE Member_id = %s
+    """, (member_id,))
+    member = cursor.fetchone()
+
+    if not member:
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    cursor.execute("""
+        SELECT
+            l.Loan_id, l.Book_id, b.Title, l.Loan_date, l.Due_date,
+            l.Return_date, l.Return_status
+        FROM loan l
+        JOIN book b ON l.Book_id = b.Book_id
+        WHERE l.Member_id = %s
+        ORDER BY l.Loan_date DESC
+    """, (member_id,))
+    loans = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT f.Fine_id, f.Loan_id, f.Fine_amount, f.Payment_date,
+               f.Paid_status, b.Title
+        FROM fine f
+        JOIN loan l ON f.Loan_id = l.Loan_id
+        JOIN book b ON l.Book_id = b.Book_id
+        WHERE l.Member_id = %s
+        ORDER BY f.Paid_status DESC, f.Fine_id DESC
+    """, (member_id,))
+    fines = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT COALESCE(SUM(Fine_amount), 0) AS total
+        FROM fine f
+        JOIN loan l ON f.Loan_id = l.Loan_id
+        WHERE l.Member_id = %s AND f.Paid_status = 'Unpaid'
+    """, (member_id,))
+    unpaid_total = float(cursor.fetchone()["total"] or 0)
+
+    cursor.close()
+    db.close()
+
+    return {
+        "member": member,
+        "loans": loans,
+        "fines": fines,
+        "unpaid_total": unpaid_total,
+    }
+
+# LIBRARIAN: LOAN MANAGEMENT (circulation desk)
+
+@app.get("/librarian/loans")
+def librarian_get_loans(
+    access_token: str = Cookie(None),
+    status: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("""
+        UPDATE loan
+        SET Return_status = 'overdue'
+        WHERE Return_status = 'borrowed'
+          AND DATE(Due_date) < CURDATE()
+    """)
+    cursor.execute("""
+        UPDATE loan
+        SET Return_status = 'borrowed'
+        WHERE Return_status = 'overdue'
+          AND DATE(Due_date) >= CURDATE()
+    """)
+    db.commit()
+
+    query = """
+        SELECT l.*, b.Title, m.First_name, m.Last_name
+        FROM loan l
+        JOIN book b ON l.Book_id = b.Book_id
+        JOIN MEMBERS m ON l.Member_id = m.Member_id
+        WHERE 1=1
+    """
+    params = []
+
+    if status and status != "all":
+        query += " AND l.Return_status = %s"
+        params.append(status)
+
+    if search:
+        query += """
+            AND (
+                b.Title LIKE %s
+                OR m.First_name LIKE %s
+                OR m.Last_name LIKE %s
+                OR CAST(l.Member_id AS CHAR) = %s
+                OR CAST(l.Loan_id AS CHAR) = %s
+            )
+        """
+        like = f"%{search}%"
+        params.extend([like, like, like, search, search])
+
+    query += " ORDER BY l.Loan_date DESC LIMIT %s"
+    params.append(limit)
+
+    cursor.execute(query, params)
+    loans = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+
+    return loans
+
+
+@app.post("/librarian/loans")
+def librarian_create_loan(loan: LoanCreate, access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("SELECT Avail_stock FROM book WHERE Book_id = %s", (loan.Book_id,))
+    book = cursor.fetchone()
+
+    if not book:
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    if book["Avail_stock"] <= 0:
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=400, detail="No available copies to loan")
+
+    cursor.execute("SELECT Member_id FROM MEMBERS WHERE Member_id = %s", (loan.Member_id,))
+    if not cursor.fetchone():
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    cursor.execute("""
+        INSERT INTO loan (Book_id, Member_id, Loan_date, Due_date, Return_date, Return_status)
+            VALUES (%s, %s, %s, %s, NULL, 'borrowed')
+    """, (loan.Book_id, loan.Member_id, loan.Loan_date, loan.Due_date))
+
+    cursor.execute("UPDATE book SET Avail_stock = Avail_stock - 1 WHERE Book_id = %s", (loan.Book_id,))
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"message": "Loan created successfully"}
+
+
+@app.put("/librarian/loans/{loan_id}/return")
+def librarian_return_loan(loan_id: int, access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("SELECT * FROM loan WHERE Loan_id = %s", (loan_id,))
+    loan = cursor.fetchone()
+
+    if not loan:
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Loan not found")
+
+    if loan["Return_status"] not in ("borrowed", "overdue"):
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=400, detail="This loan has already been processed")
+
+    cursor.execute("""
+        UPDATE loan
+        SET Return_date = CURDATE(),
+            Return_status = 'returned'
+        WHERE Loan_id = %s
+    """, (loan_id,))
+
+    cursor.execute(
+        "UPDATE book SET Avail_stock = Avail_stock + 1 WHERE Book_id = %s",
+        (loan["Book_id"],),
+    )
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"message": "Book returned successfully"}
+
+
+@app.put("/librarian/loans/{loan_id}/lost")
+def librarian_mark_lost(loan_id: int, access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("SELECT * FROM loan WHERE Loan_id = %s", (loan_id,))
+    loan = cursor.fetchone()
+
+    if not loan:
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Loan not found")
+
+    if loan["Return_status"] not in ("borrowed", "overdue"):
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=400, detail="Only borrowed or overdue books can be marked lost")
+
+    cursor.execute("""
+        UPDATE loan
+        SET Return_status = 'lost'
+        WHERE Loan_id = %s
+    """, (loan_id,))
+
+    cursor.execute(
+        "UPDATE book SET Total_stock = Total_stock - 1 WHERE Book_id = %s",
+        (loan["Book_id"],),
+    )
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"message": "Book marked as lost"}
+
+
+@app.put("/librarian/loans/{loan_id}/renew")
+def librarian_renew_loan(
+    loan_id: int,
+    days: int = 14,
+    access_token: str = Cookie(None),
+):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    if days <= 0 or days > 60:
+        raise HTTPException(status_code=400, detail="Renewal must be between 1 and 60 days")
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("SELECT * FROM loan WHERE Loan_id = %s", (loan_id,))
+    loan = cursor.fetchone()
+
+    if not loan:
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Loan not found")
+
+    if loan["Return_status"] not in ("borrowed", "overdue"):
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=400, detail="Only active loans can be renewed")
+
+    cursor.execute("""
+        UPDATE loan
+        SET Due_date = DATE_ADD(Due_date, INTERVAL %s DAY),
+            Return_status = CASE
+                WHEN DATE_ADD(Due_date, INTERVAL %s DAY) >= CURDATE() THEN 'borrowed'
+                ELSE Return_status
+            END
+        WHERE Loan_id = %s
+    """, (days, days, loan_id))
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"message": f"Loan renewed by {days} days"}
+
+# LIBRARIAN: FINES (collection desk)
+
+@app.get("/librarian/fines")
+def librarian_get_fines(
+    access_token: str = Cookie(None),
+    paid: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    query = """
+        SELECT
+            f.Fine_id, f.Loan_id, f.Fine_amount, f.Payment_date, f.Paid_status,
+            l.Member_id, l.Book_id, l.Loan_date, l.Due_date, l.Return_date,
+            l.Return_status,
+            b.Title,
+            m.First_name, m.Last_name
+        FROM fine f
+        JOIN loan l ON f.Loan_id = l.Loan_id
+        JOIN book b ON l.Book_id = b.Book_id
+        JOIN MEMBERS m ON l.Member_id = m.Member_id
+        WHERE 1=1
+    """
+    params = []
+
+    if paid == "unpaid":
+        query += " AND f.Paid_status = 'Unpaid'"
+    elif paid == "paid":
+        query += " AND f.Paid_status = 'Paid'"
+
+    if search:
+        query += """
+            AND (
+                b.Title LIKE %s
+                OR m.First_name LIKE %s
+                OR m.Last_name LIKE %s
+                OR CAST(l.Member_id AS CHAR) = %s
+            )
+        """
+        like = f"%{search}%"
+        params.extend([like, like, like, search])
+
+    query += " ORDER BY f.Paid_status ASC, f.Fine_id DESC LIMIT %s"
+    params.append(limit)
+
+    cursor.execute(query, params)
+    fines = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+
+    return fines
+
+
+@app.put("/librarian/fines/{fine_id}/pay")
+def librarian_pay_fine(fine_id: int, access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("SELECT * FROM fine WHERE Fine_id = %s", (fine_id,))
+    fine = cursor.fetchone()
+
+    if not fine:
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Fine not found")
+
+    if fine["Paid_status"] == "Paid":
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=400, detail="Fine already paid")
+
+    cursor.execute("""
+        UPDATE fine
+        SET Paid_status = 'Paid',
+            Payment_date = CURDATE()
+        WHERE Fine_id = %s
+    """, (fine_id,))
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"message": "Fine marked as paid"}

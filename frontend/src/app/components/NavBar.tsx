@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router";
-import { Home, Search, LogIn, UserPlus, LayoutDashboard, LogOut } from "lucide-react";
+import { Home, Search, LogIn, UserPlus, LayoutDashboard, LogOut, BookOpen } from "lucide-react";
 import { useAuth } from "./AuthContext";
 
 export default function NavBar() {
@@ -58,6 +58,17 @@ export default function NavBar() {
               <Search className="w-4 h-4" />
               <span>Search</span>
             </button>
+
+            {/* LIBRARIAN + ADMIN */}
+            {(user?.Member_role === "librarian" || user?.Member_role === "admin") && (
+              <button
+                onClick={() => navigate("/librarian")}
+                className="flex items-center gap-2 text-gray-700 hover:text-black transition-colors"
+              >
+                <BookOpen className="w-4 h-4" />
+                <span>Librarian</span>
+              </button>
+            )}
 
             {/* ADMIN ONLY */}
             {user?.Member_role === "admin" && (

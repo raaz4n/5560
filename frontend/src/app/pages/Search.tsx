@@ -278,7 +278,9 @@ export default function Search() {
                           return;
                         }
 
-                        navigate(`/reserve/${book.Book_id}`);
+                        alert(
+                          "Reservations aren't online yet — please visit the circulation desk to check out this book."
+                        );
                       }}
                     >
                       {book.Avail_stock > 0 ? "Reserve Book" : "Out of Stock"}

@@ -10,6 +10,7 @@ interface Book {
   Total_stock: number;
   Avail_stock: number;
   Genre: string;
+  Publisher_id: number | null;
   Publisher_name: string | null;
 }
 
@@ -126,10 +127,18 @@ export default function ManageBooks() {
   async function saveBookChanges() {
     if (!selectedBook) return;
 
-    if (Number(editTotalStock) < selectedBook.Avail_stock) {
-      alert(`Total stock cannot be less than available stock (${selectedBook.Avail_stock}).`);
+    const newTotal = Number(editTotalStock);
+    const borrowed = selectedBook.Total_stock - selectedBook.Avail_stock;
+
+    if (newTotal < borrowed) {
+      alert(`Total stock cannot be less than borrowed copies (${borrowed}).`);
       return;
     }
+
+    // If total increased, make the new copies available; if it decreased,
+    // clamp available stock so it never exceeds total.
+    const delta = newTotal - selectedBook.Total_stock;
+    const newAvail = Math.max(0, selectedBook.Avail_stock + delta);
 
     await fetch(`http://localhost:8000/admin/books/${selectedBook.Book_id}`, {
       method: "PUT",
@@ -138,8 +147,8 @@ export default function ManageBooks() {
       body: JSON.stringify({
         Title: editTitle,
         Publish_year: selectedBook.Publish_year,
-        Total_stock: Number(editTotalStock),
-        Avail_stock: null,
+        Total_stock: newTotal,
+        Avail_stock: newAvail,
         Genre: editGenre,
         Publisher_id: editPublisherId,
       }),
@@ -241,6 +250,7 @@ export default function ManageBooks() {
                             setEditISBN(book.ISBN);
                             setEditGenre(book.Genre);
                             setEditPublisher(book.Publisher_name || "");
+                            setEditPublisherId(book.Publisher_id ?? null);
                             setEditTotalStock(book.Total_stock.toString());
                             setEditModalOpen(true);
                           }}
@@ -416,8 +426,10 @@ export default function ManageBooks() {
 
                 <div className="border rounded-lg">
                   <select
-                    value={newPublisherId ?? ""}
-                    onChange={(e) => setNewPublisherId(Number(e.target.value))}
+                    value={editPublisherId ?? ""}
+                    onChange={(e) =>
+                      setEditPublisherId(e.target.value ? Number(e.target.value) : null)
+                    }
                     className="w-full px-4 py-2"
                   >
                     <option value="">Select publisher</option>
