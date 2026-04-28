@@ -17,8 +17,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 def get_db():
     return mysql.connector.connect(
         host="localhost",
-        user="main_test",         # your MySQL username
-        password="superpassword",     # your MySQL password
+        user="root",         # your MySQL username
+        password="PASSWORD",     # your MySQL password
         database="LIBRARY",
         auth_plugin="mysql_native_password" # needed for some MySQL setups, adjust if necessary
     )
