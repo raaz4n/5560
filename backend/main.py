@@ -17,8 +17,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 def get_db():
     return mysql.connector.connect(
         host="localhost",
-        user="root",         # your MySQL username
-        password="PASSWORD",     # your MySQL password
+        user="main_test",         # your MySQL username
+        password="superpassword",     # your MySQL password
         database="LIBRARY",
         auth_plugin="mysql_native_password" # needed for some MySQL setups, adjust if necessary
     )
@@ -142,22 +142,34 @@ def update_fines_for_member(member_id: int):
     """, (member_id,))
     db.commit()
 
-    # 2. Insert fines for newly overdue loans (no duplicates)
+    # 2. Insert fines for newly overdue loans (no duplicates).
+    #    Schema has no AUTO_INCREMENT on Fine_id, so we compute the next id ourselves.
     cursor.execute("""
-        INSERT INTO fine (Loan_id, Fine_amount, Payment_date, Paid_status)
-        SELECT 
+        SELECT
             l.Loan_id,
-            CEIL(DATEDIFF(CURDATE(), l.Due_date) / 30) * 15 AS Fine_amount,
-            NULL AS Payment_date,
-            'Unpaid' AS Paid_status
+            CEIL(DATEDIFF(CURDATE(), l.Due_date) / 30) * 15 AS Fine_amount
         FROM loan l
         LEFT JOIN fine f ON f.Loan_id = l.Loan_id
         WHERE l.Member_id = %s
-        AND l.Return_date IS NULL
-        AND l.Due_date < CURDATE()
-        AND f.Loan_id IS NULL
+          AND l.Return_date IS NULL
+          AND l.Due_date < CURDATE()
+          AND f.Loan_id IS NULL
     """, (member_id,))
-    db.commit()
+    new_fines = cursor.fetchall()
+
+    if new_fines:
+        cursor.execute("SELECT COALESCE(MAX(Fine_id), 0) AS max_id FROM fine")
+        next_id = cursor.fetchone()["max_id"] + 1
+        for row in new_fines:
+            cursor.execute(
+                """
+                INSERT INTO fine (Fine_id, Loan_id, Fine_amount, Payment_date, Paid_status)
+                VALUES (%s, %s, %s, NULL, 'Unpaid')
+                """,
+                (next_id, row["Loan_id"], row["Fine_amount"]),
+            )
+            next_id += 1
+        db.commit()
 
     # 3. Update existing fines
     cursor.execute("""
@@ -594,12 +606,16 @@ def admin_add_book(book: BookCreate, access_token: str = Cookie(None)):
     require_admin(current)
 
     db = get_db()
-    cursor = db.cursor()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("SELECT COALESCE(MAX(Book_id), 0) AS max_id FROM book")
+    next_id = cursor.fetchone()["max_id"] + 1
 
     cursor.execute("""
-        INSERT INTO book (ISBN, Title, Publish_year, Total_stock, Avail_stock, Genre, Publisher_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO book (Book_id, ISBN, Title, Publish_year, Total_stock, Avail_stock, Genre, Publisher_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, (
+        next_id,
         book.ISBN,
         book.Title,
         book.Publish_year,
@@ -759,11 +775,14 @@ def admin_create_loan(loan: LoanCreate, access_token: str = Cookie(None)):
     if book["Avail_stock"] <= 0:
         raise HTTPException(status_code=400, detail="No available copies to loan")
 
+    cursor.execute("SELECT COALESCE(MAX(Loan_id), 0) AS max_id FROM loan")
+    next_id = cursor.fetchone()["max_id"] + 1
+
     # Create loan
     cursor.execute("""
-        INSERT INTO loan (Book_id, Member_id, Loan_date, Due_date, Return_date, Return_status)
-            VALUES (%s, %s, %s, %s, NULL, 'borrowed')
-    """, (loan.Book_id, loan.Member_id, loan.Loan_date, loan.Due_date))
+        INSERT INTO loan (Loan_id, Book_id, Member_id, Loan_date, Due_date, Return_date, Return_status)
+            VALUES (%s, %s, %s, %s, %s, NULL, 'borrowed')
+    """, (next_id, loan.Book_id, loan.Member_id, loan.Loan_date, loan.Due_date))
 
     cursor.execute("UPDATE book SET Avail_stock = Avail_stock - 1 WHERE Book_id = %s", (loan.Book_id,))
 
@@ -1298,10 +1317,13 @@ def librarian_create_loan(loan: LoanCreate, access_token: str = Cookie(None)):
         db.close()
         raise HTTPException(status_code=404, detail="Member not found")
 
+    cursor.execute("SELECT COALESCE(MAX(Loan_id), 0) AS max_id FROM loan")
+    next_id = cursor.fetchone()["max_id"] + 1
+
     cursor.execute("""
-        INSERT INTO loan (Book_id, Member_id, Loan_date, Due_date, Return_date, Return_status)
-            VALUES (%s, %s, %s, %s, NULL, 'borrowed')
-    """, (loan.Book_id, loan.Member_id, loan.Loan_date, loan.Due_date))
+        INSERT INTO loan (Loan_id, Book_id, Member_id, Loan_date, Due_date, Return_date, Return_status)
+            VALUES (%s, %s, %s, %s, %s, NULL, 'borrowed')
+    """, (next_id, loan.Book_id, loan.Member_id, loan.Loan_date, loan.Due_date))
 
     cursor.execute("UPDATE book SET Avail_stock = Avail_stock - 1 WHERE Book_id = %s", (loan.Book_id,))
 
