@@ -68,6 +68,59 @@ export default function CirculationDesk() {
   const [dueDate, setDueDate] = useState(inDays(14));
   const [checkoutMsg, setCheckoutMsg] = useState<string | null>(null);
 
+  // Reservation lookup state — when set, the checkout flow fulfills a reservation
+  // instead of creating a fresh loan, so we won't decrement stock twice.
+  const [reservationCode, setReservationCode] = useState("");
+  const [activeReservationId, setActiveReservationId] = useState<number | null>(null);
+  const [reservationMsg, setReservationMsg] = useState<string | null>(null);
+
+  async function lookupReservation() {
+    setReservationMsg(null);
+    const id = Number(reservationCode);
+    if (!id) {
+      setReservationMsg("Enter a reservation number");
+      return;
+    }
+    const res = await fetch(`http://localhost:8000/librarian/reservations/${id}`, {
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "Lookup failed" }));
+      setReservationMsg(err.detail);
+      return;
+    }
+    const r = await res.json();
+    if (r.Status !== "pending") {
+      setReservationMsg(`Reservation #${id} is ${r.Status} — can't fulfill.`);
+      return;
+    }
+    // Pre-fill the chips
+    setSelectedBook({
+      Book_id: r.Book_id,
+      ISBN: r.ISBN,
+      Title: r.Title,
+      Avail_stock: r.Avail_stock,
+      Total_stock: r.Total_stock,
+    });
+    setSelectedMember({
+      Member_id: r.Member_id,
+      First_name: r.First_name,
+      Last_name: r.Last_name,
+      Email: r.Email,
+    });
+    setActiveReservationId(id);
+    setReservationMsg(null);
+    setBookQuery("");
+    setMemberQuery("");
+  }
+
+  function clearReservation() {
+    setActiveReservationId(null);
+    setReservationCode("");
+    setSelectedBook(null);
+    setSelectedMember(null);
+  }
+
   async function loadLoans() {
     try {
       const params = new URLSearchParams();
@@ -134,17 +187,26 @@ export default function CirculationDesk() {
       return;
     }
 
-    const res = await fetch("http://localhost:8000/librarian/loans", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        Book_id: selectedBook.Book_id,
-        Member_id: selectedMember.Member_id,
-        Loan_date: loanDate,
-        Due_date: dueDate,
-      }),
-    });
+    let res: Response;
+    if (activeReservationId) {
+      // Fulfill an existing reservation — backend creates the loan and won't decrement stock again
+      res = await fetch(
+        `http://localhost:8000/librarian/reservations/${activeReservationId}/fulfill`,
+        { method: "POST", credentials: "include" }
+      );
+    } else {
+      res = await fetch("http://localhost:8000/librarian/loans", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          Book_id: selectedBook.Book_id,
+          Member_id: selectedMember.Member_id,
+          Loan_date: loanDate,
+          Due_date: dueDate,
+        }),
+      });
+    }
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: "Checkout failed" }));
@@ -152,9 +214,12 @@ export default function CirculationDesk() {
       return;
     }
 
-    setCheckoutMsg(
-      `Checked out "${selectedBook.Title}" to ${selectedMember.First_name} ${selectedMember.Last_name}. Due ${dueDate}.`
-    );
+    const note = activeReservationId
+      ? `Fulfilled reservation #${activeReservationId} for "${selectedBook.Title}" — ${selectedMember.First_name} ${selectedMember.Last_name}.`
+      : `Checked out "${selectedBook.Title}" to ${selectedMember.First_name} ${selectedMember.Last_name}. Due ${dueDate}.`;
+    setCheckoutMsg(note);
+    setActiveReservationId(null);
+    setReservationCode("");
     setSelectedBook(null);
     setSelectedMember(null);
     setBookQuery("");
@@ -224,11 +289,54 @@ export default function CirculationDesk() {
 
         <h1 className="text-4xl mb-8">Circulation Desk</h1>
 
+        {/* RESERVATION LOOKUP PANEL */}
+        <div className="bg-white rounded-xl shadow-sm p-4 mb-4 border border-gray-200">
+          <div className="flex flex-col md:flex-row md:items-end md:gap-4 gap-3">
+            <div className="flex-1">
+              <label className="text-sm text-gray-600 mb-1 block">
+                Reservation #{" "}
+                <span className="text-gray-400 font-normal">(member's pickup code)</span>
+              </label>
+              <input
+                value={reservationCode}
+                onChange={(e) => setReservationCode(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") lookupReservation(); }}
+                placeholder="e.g. 42"
+                disabled={!!activeReservationId}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg disabled:bg-gray-100"
+              />
+            </div>
+            {activeReservationId ? (
+              <button
+                onClick={clearReservation}
+                className="border border-gray-300 px-4 py-2 rounded-lg hover:bg-gray-50"
+              >
+                Clear reservation
+              </button>
+            ) : (
+              <button
+                onClick={lookupReservation}
+                className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
+              >
+                Look up
+              </button>
+            )}
+          </div>
+          {reservationMsg && (
+            <div className="mt-2 text-sm text-red-600">{reservationMsg}</div>
+          )}
+          {activeReservationId && (
+            <div className="mt-2 text-sm text-emerald-700">
+              Reservation #{activeReservationId} loaded — click <strong>Check Out</strong> below to fulfill.
+            </div>
+          )}
+        </div>
+
         {/* CHECKOUT PANEL */}
         <div className="bg-white rounded-xl shadow-sm p-6 mb-8 border border-gray-200">
           <div className="flex items-center gap-2 mb-4">
             <BookPlus className="w-5 h-5 text-blue-600" />
-            <h2 className="text-xl">New Checkout</h2>
+            <h2 className="text-xl">{activeReservationId ? "Fulfill Reservation" : "New Checkout"}</h2>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

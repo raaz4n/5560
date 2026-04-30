@@ -6,6 +6,7 @@ import imgImage1 from "figma:asset/20f7cedb03dddba5130a763226504ec61eca2864.png"
 import { useAuth } from "../components/AuthContext";
 import { useUserLoans } from "../hooks/useUserLoans";
 import { useUserFines } from "../hooks/useUserFines";
+import { useUserReservations } from "../hooks/useUserReservations";
 
 // Animation variants for fade-in effect
 const fadeInUpVariants = {
@@ -435,6 +436,21 @@ export default function Home() {
   const { user } = useAuth();
   const { loans, loading: loansLoading } = useUserLoans();
   const { fines, finesLoading } = useUserFines();
+  const { reservations, loading: reservationsLoading, reload: reloadReservations } = useUserReservations();
+
+  async function cancelReservation(id: number) {
+    if (!confirm("Cancel this reservation? The copy will be returned to the shelf.")) return;
+    const res = await fetch(`http://localhost:8000/reservations/${id}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "Failed to cancel" }));
+      alert(err.detail);
+      return;
+    }
+    reloadReservations();
+  }
 
   return (
     <main
@@ -448,6 +464,39 @@ export default function Home() {
       onCreateAccount={() => navigate("/signup")}
       onSearchClick={() => navigate("/search")}
       />
+      {user && (
+        <section className="w-full px-4 md:px-16 py-12">
+          <h2 className="text-3xl font-semibold mb-6">Your Reservations</h2>
+
+          {reservationsLoading ? (
+            <p className="text-gray-500">Loading your reservations…</p>
+          ) : reservations.filter((r: any) => r.Status === "pending").length === 0 ? (
+            <p className="text-gray-500">You have no active reservations.</p>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {reservations
+                .filter((r: any) => r.Status === "pending")
+                .map((r: any) => (
+                  <div key={r.Reservation_id} className="bg-white p-6 rounded-xl shadow-sm">
+                    <h3 className="text-xl font-medium">{r.Title}</h3>
+                    <p className="text-gray-600 mt-1">
+                      Pickup code: <span className="font-mono font-semibold">#{r.Reservation_id}</span>
+                    </p>
+                    <p className="text-gray-600">
+                      Pick up by: {new Date(r.Expires_at).toLocaleString()}
+                    </p>
+                    <button
+                      onClick={() => cancelReservation(r.Reservation_id)}
+                      className="mt-3 text-sm text-red-600 hover:underline"
+                    >
+                      Cancel reservation
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
+        </section>
+      )}
       {user && (
         <section className="w-full px-4 md:px-16 py-12">
           <h2 className="text-3xl font-semibold mb-6">Your Loans</h2>

@@ -94,6 +94,10 @@ class LoanCreate(BaseModel):
     Loan_date: date
     Due_date: date
 
+
+class ReservationCreate(BaseModel):
+    Book_id: int
+
 # AUTH HELPERS
 
 def get_current_user(access_token: str | None):
@@ -185,6 +189,41 @@ def update_fines_for_member(member_id: int):
 
     cursor.close()
     db.close()
+
+
+def expire_stale_reservations(cursor, db) -> None:
+    """Lazy sweep: flip pending reservations whose Expires_at has passed
+    to 'expired', and bump the corresponding book's Avail_stock back by one
+    for each. Idempotent — safe to call from any read endpoint."""
+    cursor.execute("""
+        SELECT Reservation_id, Book_id
+        FROM reservation
+        WHERE Status = 'pending' AND Expires_at < NOW()
+    """)
+    stale = cursor.fetchall()
+    if not stale:
+        return
+
+    # Build a row-style dict regardless of cursor type
+    book_ids = []
+    res_ids = []
+    for row in stale:
+        if isinstance(row, dict):
+            book_ids.append(row["Book_id"])
+            res_ids.append(row["Reservation_id"])
+        else:
+            res_ids.append(row[0])
+            book_ids.append(row[1])
+
+    cursor.executemany(
+        "UPDATE book SET Avail_stock = Avail_stock + 1 WHERE Book_id = %s",
+        [(bid,) for bid in book_ids],
+    )
+    cursor.executemany(
+        "UPDATE reservation SET Status = 'expired' WHERE Reservation_id = %s",
+        [(rid,) for rid in res_ids],
+    )
+    db.commit()
 
 
 # AUTH ROUTES
@@ -366,12 +405,173 @@ def get_member_fines(member_id: int, access_token: str = Cookie(None)):
 
     return fines
 
+# MEMBER: RESERVATIONS
+
+@app.post("/reservations")
+def create_reservation(
+    body: ReservationCreate,
+    access_token: str = Cookie(None),
+):
+    current = get_current_user(access_token)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    expire_stale_reservations(cursor, db)
+
+    # Lock the book row so two concurrent reservations can't both pass the stock check.
+    # mysql-connector-python auto-starts a transaction, so we just FOR UPDATE here and
+    # commit/rollback at the end.
+    cursor.execute(
+        "SELECT Book_id, Title, Avail_stock FROM book WHERE Book_id = %s FOR UPDATE",
+        (body.Book_id,),
+    )
+    book = cursor.fetchone()
+    if not book:
+        db.rollback()
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    if book["Avail_stock"] <= 0:
+        db.rollback()
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=400, detail="No available copies to reserve")
+
+    # Optional: prevent duplicate pending reservations of the same book by the same member
+    cursor.execute(
+        """
+        SELECT Reservation_id FROM reservation
+        WHERE Member_id = %s AND Book_id = %s AND Status = 'pending'
+        LIMIT 1
+        """,
+        (current["Member_id"], body.Book_id),
+    )
+    if cursor.fetchone():
+        db.rollback()
+        cursor.close()
+        db.close()
+        raise HTTPException(
+            status_code=400,
+            detail="You already have a pending reservation for this book",
+        )
+
+    cursor.execute(
+        "UPDATE book SET Avail_stock = Avail_stock - 1 WHERE Book_id = %s",
+        (body.Book_id,),
+    )
+
+    cursor.execute(
+        """
+        INSERT INTO reservation
+            (Book_id, Member_id, Requested_at, Expires_at, Status, Loan_id)
+        VALUES
+            (%s, %s, NOW(), DATE_ADD(NOW(), INTERVAL 48 HOUR), 'pending', NULL)
+        """,
+        (body.Book_id, current["Member_id"]),
+    )
+    new_id = cursor.lastrowid
+
+    db.commit()
+
+    cursor.execute(
+        """
+        SELECT Reservation_id, Book_id, Requested_at, Expires_at, Status
+        FROM reservation WHERE Reservation_id = %s
+        """,
+        (new_id,),
+    )
+    created = cursor.fetchone()
+    created["Title"] = book["Title"]
+
+    cursor.close()
+    db.close()
+
+    return created
+
+
+@app.get("/reservations/me")
+def get_my_reservations(access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    expire_stale_reservations(cursor, db)
+
+    cursor.execute(
+        """
+        SELECT r.Reservation_id, r.Book_id, b.Title, r.Requested_at,
+               r.Expires_at, r.Status, r.Loan_id
+        FROM reservation r
+        JOIN book b ON b.Book_id = r.Book_id
+        WHERE r.Member_id = %s
+        ORDER BY r.Reservation_id DESC
+        """,
+        (current["Member_id"],),
+    )
+    rows = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+
+    return rows
+
+
+@app.delete("/reservations/{reservation_id}")
+def cancel_reservation(reservation_id: int, access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute(
+        "SELECT * FROM reservation WHERE Reservation_id = %s FOR UPDATE",
+        (reservation_id,),
+    )
+    res = cursor.fetchone()
+    if not res:
+        db.rollback()
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Reservation not found")
+
+    if res["Member_id"] != current["Member_id"] and (current["Member_role"] or "").lower() not in ("admin", "librarian"):
+        db.rollback()
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    if res["Status"] != "pending":
+        db.rollback()
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=400, detail=f"Reservation is already {res['Status']}")
+
+    cursor.execute(
+        "UPDATE book SET Avail_stock = Avail_stock + 1 WHERE Book_id = %s",
+        (res["Book_id"],),
+    )
+    cursor.execute(
+        "UPDATE reservation SET Status = 'cancelled' WHERE Reservation_id = %s",
+        (reservation_id,),
+    )
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"message": "Reservation cancelled"}
+
 # PUBLIC BOOK ROUTES
 
 @app.get("/books")
 def get_books(search: str = "", genre: str = "", availability: str = ""):
     db = get_db()
     cursor = db.cursor(dictionary=True)
+
+    expire_stale_reservations(cursor, db)
 
     query = """
         SELECT b.Book_id, b.ISBN, b.Title, b.Publish_year,
@@ -1549,3 +1749,89 @@ def librarian_pay_fine(fine_id: int, access_token: str = Cookie(None)):
     db.close()
 
     return {"message": "Fine marked as paid"}
+
+# LIBRARIAN: RESERVATIONS
+
+@app.get("/librarian/reservations/{reservation_id}")
+def librarian_lookup_reservation(reservation_id: int, access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    expire_stale_reservations(cursor, db)
+
+    cursor.execute(
+        """
+        SELECT r.Reservation_id, r.Status, r.Requested_at, r.Expires_at, r.Loan_id,
+               b.Book_id, b.ISBN, b.Title, b.Avail_stock, b.Total_stock,
+               m.Member_id, m.First_name, m.Last_name, m.Email
+        FROM reservation r
+        JOIN book b ON b.Book_id = r.Book_id
+        JOIN MEMBERS m ON m.Member_id = r.Member_id
+        WHERE r.Reservation_id = %s
+        """,
+        (reservation_id,),
+    )
+    row = cursor.fetchone()
+
+    cursor.close()
+    db.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+    return row
+
+
+@app.post("/librarian/reservations/{reservation_id}/fulfill")
+def librarian_fulfill_reservation(reservation_id: int, access_token: str = Cookie(None)):
+    current = get_current_user(access_token)
+    require_librarian_or_admin(current)
+
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute(
+        "SELECT * FROM reservation WHERE Reservation_id = %s FOR UPDATE",
+        (reservation_id,),
+    )
+    res = cursor.fetchone()
+    if not res:
+        db.rollback()
+        cursor.close()
+        db.close()
+        raise HTTPException(status_code=404, detail="Reservation not found")
+
+    if res["Status"] != "pending":
+        db.rollback()
+        cursor.close()
+        db.close()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reservation is already {res['Status']}",
+        )
+
+    # Stock was decremented at reservation time; do NOT decrement again here.
+    # Standard 14-day loan from today.
+    cursor.execute("SELECT COALESCE(MAX(Loan_id), 0) AS max_id FROM loan")
+    next_loan_id = cursor.fetchone()["max_id"] + 1
+
+    cursor.execute(
+        """
+        INSERT INTO loan (Loan_id, Book_id, Member_id, Loan_date, Due_date, Return_date, Return_status)
+        VALUES (%s, %s, %s, CURDATE(), DATE_ADD(CURDATE(), INTERVAL 14 DAY), NULL, 'borrowed')
+        """,
+        (next_loan_id, res["Book_id"], res["Member_id"]),
+    )
+
+    cursor.execute(
+        "UPDATE reservation SET Status = 'fulfilled', Loan_id = %s WHERE Reservation_id = %s",
+        (next_loan_id, reservation_id),
+    )
+
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"message": "Reservation fulfilled", "Loan_id": next_loan_id}

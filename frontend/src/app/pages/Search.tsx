@@ -270,7 +270,7 @@ export default function Search() {
                     <Button
                     className="w-full mt-4"
                     disabled={book.Avail_stock === 0}
-                    onClick={() => {
+                    onClick={async () => {
                         if (book.Avail_stock === 0) return;
 
                         if (!isLoggedIn) {
@@ -278,8 +278,30 @@ export default function Search() {
                           return;
                         }
 
+                        const res = await fetch("http://localhost:8000/reservations", {
+                          method: "POST",
+                          credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ Book_id: book.Book_id }),
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                          alert(data.detail || "Failed to reserve");
+                          return;
+                        }
+                        const expires = new Date(data.Expires_at).toLocaleString();
                         alert(
-                          "Reservations aren't online yet — please visit the circulation desk to check out this book."
+                          `Reserved! Pickup code: #${data.Reservation_id}\n` +
+                          `Show this at the circulation desk by ${expires}.\n` +
+                          `(After that the copy returns to the shelf.)`
+                        );
+                        // Optimistically reflect the stock decrement
+                        setBooks((prev) =>
+                          prev.map((b) =>
+                            b.Book_id === book.Book_id
+                              ? { ...b, Avail_stock: Math.max(0, b.Avail_stock - 1) }
+                              : b
+                          )
                         );
                       }}
                     >
