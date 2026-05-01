@@ -104,6 +104,10 @@ npm run dev
 
 ---
 
+If you would like to view the system through an administrator view, use the following login:
+test@email.com
+123
+
 ## Database Schema
 
 | Table | Primary Key | Description |
