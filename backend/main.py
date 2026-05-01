@@ -18,7 +18,7 @@ def get_db():
     return mysql.connector.connect(
         host="localhost",
         user="root",         # your MySQL username
-        password="PASSWORD",     # your MySQL password
+        password="your_mysql_password_here",     # your MySQL password
         database="LIBRARY",
         auth_plugin="mysql_native_password" # needed for some MySQL setups, adjust if necessary
     )

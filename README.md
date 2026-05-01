@@ -57,11 +57,10 @@ CREATE DATABASE LIBRARY;
 USE LIBRARY;
 ```
 
-Then open and run each file via **File → Open SQL Script** in this order:
+Then open and run the following SQL script:
 
-1. `database/Library_DB_new.sql`
-2. `database/MEMBERS.sql`
-3. `database/books_insert.sql`
+`database/Library_DB_new.sql`
+
 
 ### Step 2 — Backend Configuration
 
