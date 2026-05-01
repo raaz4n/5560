@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import NavBar from "../components/NavBar";
+import NavBar from "../components/NavBarWithRecs";
 import { useNavigate } from "react-router";
 
 interface Book {
